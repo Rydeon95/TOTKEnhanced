@@ -1,8 +1,8 @@
-# TOTKEnanched 0.3
+# TOTKEnhanced 0.3
 
 Based on TotK Recomp v0.1.1.
 
-TOTKEnanched 0.3 is based on TotK Recomp v0.1.1 (upstream commit 701bd628209956a70863d864844bc97cdaf074f1).
+TOTKEnhanced 0.3 is based on TotK Recomp v0.1.1 (upstream commit 701bd628209956a70863d864844bc97cdaf074f1).
 
 An installer-based local build with native ultrawide output and stable HUD/UI safe-area changes.
 

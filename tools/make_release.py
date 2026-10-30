@@ -14,7 +14,7 @@ cached in toolchain/release-dl/ and checked against the sha256 in PINS; a mismat
                ov_zstd.c (compiled per install), deps/ (headers and import libraries of SDL3, Opus, libvpx, Vulkan and VMA)
     bin/       totk_xlate.exe (+ .id), hactool.exe, SDL3.dll (upstream), libopus-0.dll, ninja.exe
     recomp/, tools/, data/, installer/, licenses/, THIRD_PARTY_NOTICES.md, totk.ini.example
-    VERSION    the repository's VERSION value; the installer's public release string (0.3 for TOTKEnanched 0.3)
+    VERSION    the repository's VERSION value; the installer's public release string (0.3 for TOTKEnhanced 0.3)
     TotK-Setup.exe  installer/launcher/launcher.c built with llvm/ (-mwindows): starts python/pythonw.exe -m installer.gui
 
 --prove compiles generated/v121 and links build/release-check/totk.exe with nothing but the folder's python/, llvm/,

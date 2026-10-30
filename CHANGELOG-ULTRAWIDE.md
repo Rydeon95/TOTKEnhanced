@@ -1,8 +1,8 @@
-# TOTKEnanched 0.3
+# TOTKEnhanced 0.3
 
 Based on TotK Recomp v0.1.1.
 
-TOTKEnanched 0.3 is based on TotK Recomp v0.1.1 (upstream commit 701bd628209956a70863d864844bc97cdaf074f1).
+TOTKEnhanced 0.3 is based on TotK Recomp v0.1.1 (upstream commit 701bd628209956a70863d864844bc97cdaf074f1).
 
 This local installer release keeps the upstream installer workflow: users provide their own game files and the installer
 builds the game locally.
@@ -10,7 +10,7 @@ builds the game locally.
 ## Base
 
 - Retains the upstream 0.1.1 installer, game extraction, local build, shader preparation, and install-folder workflow.
-- Gives this variant the public release name and version `TOTKEnanched 0.3`.
+- Gives this variant the public release name and version `TOTKEnhanced 0.3`.
 - Keeps support for the upstream 1.2.1 and 1.4.3 game updates. Ultrawide work was developed and tested mainly on 1.4.3.
 
 ## Ultrawide resolutions

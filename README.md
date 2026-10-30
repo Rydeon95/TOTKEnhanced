@@ -1,6 +1,6 @@
-# TOTKEnanched 0.3
+# TOTKEnhanced 0.3
 
-**TOTKEnanched 0.3** is a static recompilation of *The Legend of Zelda: Tears of the Kingdom* (Nintendo Switch, 2023) into a native Windows x86-64 application ([docs/architecture.md](docs/architecture.md)). TOTKEnanched 0.3 is based on TotK Recomp v0.1.1 (upstream commit `701bd628209956a70863d864844bc97cdaf074f1`).
+**TOTKEnhanced 0.3** is a static recompilation of *The Legend of Zelda: Tears of the Kingdom* (Nintendo Switch, 2023) into a native Windows x86-64 application ([docs/architecture.md](docs/architecture.md)). TOTKEnhanced 0.3 is based on TotK Recomp v0.1.1 (upstream commit `701bd628209956a70863d864844bc97cdaf074f1`).
 
 > [!IMPORTANT]
 > **No game files are included.** You need your own legally obtained copy of *Tears of the Kingdom*, dumped from your own console: the base game and the 1.2.1 or 1.4.3 update. Instructions for obtaining those files will not be provided.
@@ -35,7 +35,7 @@ Report problems as issues, following [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Requirements: Windows 10 or later, an x86-64 CPU with AVX2, a GPU with Vulkan 1.3 and `VK_EXT_external_memory_host`, about 36 GiB free during setup (20 GiB after).
 
-1. Download `TOTKEnanched-0.3-windows.zip` from the project's Releases page and unpack it.
+1. Download `TOTKEnhanced-0.3-windows.zip` from the project's Releases page and unpack it.
 2. Start `TotK-Setup.exe`. If SmartScreen warns about an unsigned app, choose *More info*, then *Run anyway*.
 3. Pick your game files, the language and an install folder, and press *Start*. The setup builds the game once.
 4. Play `totk.exe` from the install folder.
@@ -44,7 +44,7 @@ To update, run a newer `TotK-Setup.exe` on the same folder; saves and settings a
 
 ## Credits
 
-TOTKEnanched is based on TotK Recomp v0.1.1 and builds on the projects below. What was taken from each, with its license, is listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+TOTKEnhanced is based on TotK Recomp v0.1.1 and builds on the projects below. What was taken from each, with its license, is listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 - [LAS Recomp](https://github.com/peiikai/LASRecomp)
 - [MacNativeGames](https://github.com/ly05010419/MacNativeGames)
