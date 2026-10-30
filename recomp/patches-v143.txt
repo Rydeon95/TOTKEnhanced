@@ -1,4 +1,4 @@
-# Code patches for TotK 1.4.3 main (recomp/patches.py). Ported from MacNativeGames
+# TOTKEnhanced 0.3 code patches for TotK 1.4.3 main (recomp/patches.py). Ported from MacNativeGames
 # games/totk/runtime/game_patches_v143.c (MIT, Copyright (c) 2026 MacNativeGames contributors) at upstream 73c4821,
 # each original word checked against the 1.4.3 main. MacNativeGames branches to veneers after the text; here a
 # veneer's body is the site's replacement. The patch page holds three floats the runtime writes at every present

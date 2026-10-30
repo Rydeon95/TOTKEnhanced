@@ -1,4 +1,4 @@
-// totk.exe entry: reserves the guest address space, parses the command line and runs one mode.
+// TOTKEnhanced runtime entry: reserves the guest address space, parses the command line and runs one mode.
 //
 //   totk.exe [--exefs DIR] [--romfs DIR] [--profile DIR] <mode>
 //     --selftest        layout, dispatch table and host-function registry; needs no game files
