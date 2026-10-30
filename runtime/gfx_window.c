@@ -438,6 +438,12 @@ static DWORD WINAPI window_main(void *arg) {
             FLASHWINFO fw = {.cbSize = sizeof fw, .hwnd = g_hwnd, .dwFlags = FLASHW_TRAY | FLASHW_TIMERNOFG};
             FlashWindowEx(&fw);
             g_fs_pending = cfg_fullscreen();
+            // The process can already own the foreground when this window is created. In that case the initial
+            // WM_ACTIVATEAPP may arrive before g_fs_pending is set, so apply the saved fullscreen setting here too.
+            if (g_fs_pending && GetForegroundWindow() == g_hwnd) {
+                g_fs_pending = 0;
+                PostMessageW(g_hwnd, WM_APP_FULLSCREEN, 0, 0);
+            }
         }
         note_applied();
         refresh_rate_update(g_hwnd, 1);
@@ -533,6 +539,7 @@ static int create_swapchain(void) {
     vk_queue_lock();
     vkDeviceWaitIdle(c->device);
     VkSwapchainKHR old = g_sc;
+    VkExtent2D previous = g_sc_ext;
     VkSwapchainCreateInfoKHR ci = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = g_surface, .minImageCount = count,
         .imageFormat = sf.format, .imageColorSpace = sf.colorSpace, .imageExtent = ext, .imageArrayLayers = 1,
@@ -556,6 +563,8 @@ static int create_swapchain(void) {
     if (old) vkDestroySwapchainKHR(c->device, old, NULL);
     g_sc_fmt = sf.format;
     g_sc_ext = ext;
+    if (old && (previous.width != ext.width || previous.height != ext.height))
+        rt_log("gfx: swapchain resized %ux%u -> %ux%u", previous.width, previous.height, ext.width, ext.height);
     g_sc_n = MAX_IMAGES;
     vkGetSwapchainImagesKHR(c->device, g_sc, &g_sc_n, g_sc_img);
     VkSemaphoreCreateInfo semi = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};

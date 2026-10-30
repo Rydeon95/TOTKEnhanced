@@ -1,6 +1,6 @@
-# TotK Recomp
+# TOTKEnanched 0.3
 
-**TotK Recomp** is a static recompilation of *The Legend of Zelda: Tears of the Kingdom* (Nintendo Switch, 2023) into a native Windows x86-64 application ([docs/architecture.md](docs/architecture.md)).
+**TOTKEnanched 0.3** is a static recompilation of *The Legend of Zelda: Tears of the Kingdom* (Nintendo Switch, 2023) into a native Windows x86-64 application ([docs/architecture.md](docs/architecture.md)). TOTKEnanched 0.3 is based on TotK Recomp v0.1.1 (upstream commit `701bd628209956a70863d864844bc97cdaf074f1`).
 
 > [!IMPORTANT]
 > **No game files are included.** You need your own legally obtained copy of *Tears of the Kingdom*, dumped from your own console: the base game and the 1.2.1 or 1.4.3 update. Instructions for obtaining those files will not be provided.
@@ -9,7 +9,7 @@
 
 ## Status
 
-Early development. The game is playable on Windows; visual bugs and crashes are still expected.
+The game is playable on Windows; visual bugs and crashes are still possible. Ultrawide changes were developed and tested mainly with game update 1.4.3; ultrawide on 1.2.1 has not been fully validated. See [CHANGELOG-ULTRAWIDE.md](CHANGELOG-ULTRAWIDE.md) for known limitations.
 
 Report problems as issues, following [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -18,7 +18,9 @@ Report problems as issues, following [CONTRIBUTING.md](CONTRIBUTING.md).
 - Native code, not emulation
 - Game updates 1.2.1 and 1.4.3, with saves that carry over between them
 - 60 fps by default; up to 144 fps or the monitor's refresh rate (experimental)
-- Custom resolutions (1080p, 2k...), supersampling and AMD FSR 1 upscaling
+- Custom resolutions, including 3440x1440 and 5120x2160, dynamic ultrawide camera aspect, and native scene sizing above 4096 pixels
+- Centered 16:9 safe-area handling for supported HUD and UI elements at ultrawide output ratios
+- Supersampling and AMD FSR 1 upscaling
 - In-game settings menu (F1) and performance overlay (F10)
 - Keyboard, mouse and gamepad with remapping, rumble and gyro
 - Shaders prepared at install instead of during play
@@ -27,14 +29,13 @@ Report problems as issues, following [CONTRIBUTING.md](CONTRIBUTING.md).
 
 - Linux and the Steam Deck
 - Mods made for emulators: unpack a mod into a `mods` folder
-- Custom aspect ratios, including ultrawide
 - VRR
 
 ## Installing
 
 Requirements: Windows 10 or later, an x86-64 CPU with AVX2, a GPU with Vulkan 1.3 and `VK_EXT_external_memory_host`, about 36 GiB free during setup (20 GiB after).
 
-1. Download `TotK-Setup-<version>-windows.zip` from [Releases](../../releases/latest) and unpack it.
+1. Download `TOTKEnanched-0.3-windows.zip` from the project's Releases page and unpack it.
 2. Start `TotK-Setup.exe`. If SmartScreen warns about an unsigned app, choose *More info*, then *Run anyway*.
 3. Pick your game files, the language and an install folder, and press *Start*. The setup builds the game once.
 4. Play `totk.exe` from the install folder.
@@ -43,7 +44,7 @@ To update, run a newer `TotK-Setup.exe` on the same folder; saves and settings a
 
 ## Credits
 
-TotK Recomp builds on the projects below. What was taken from each, with its license, is listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+TOTKEnanched is based on TotK Recomp v0.1.1 and builds on the projects below. What was taken from each, with its license, is listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 - [LAS Recomp](https://github.com/peiikai/LASRecomp)
 - [MacNativeGames](https://github.com/ly05010419/MacNativeGames)

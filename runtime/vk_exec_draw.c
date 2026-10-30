@@ -16,6 +16,7 @@
 // sampler descriptor lookups and the dispatch flow follow LAS Recomp runtime/nvn/vulkan/exec.c:1851-1908, 2300-2516
 // @ da35b83a (MIT, Copyright (c) 2026 Peiikai). The support buffer layout is Ryujinx's SupportBuffer.cs (MIT).
 #include <stdarg.h>
+#include <math.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -616,6 +617,150 @@ static int find_stage(const prog_t *p, int nvn_stage, const uint8_t **ctl, const
     int i = m->idx[nvn_stage];
     if (i < 0) return 0;
     *ctl = p->sd[i].control, *code = (const uint8_t *)(uintptr_t)p->sd[i].data, *len = m->len[nvn_stage];
+    return 1;
+}
+
+// The UI shader key is the first four bytes of SHA-256(control section, game code), as in the 1.4.3 safe-area
+// reference. Keep this source key separate from GfxShader's translated SPIR-V hash; capture output uses the same
+// eight-hex-digit value that the HUD classifier compares.
+static int ui_original_shader_hash(const prog_t *p, int stage, uint32_t *out) {
+    static struct { const prog_t *prog; uint64_t serial; int stage; int valid; uint32_t hash; } cache[1024];
+    if (!p || !out) return 0;
+    uint32_t slot = (uint32_t)((((uintptr_t)p >> 4) ^ (p->serial * 0x9E3779B97F4A7C15ull) ^
+                                ((uint64_t)(unsigned)stage * 0xD6E8FEB86659FD93ull)) & 1023);
+    typeof(cache[0]) *e = &cache[slot];
+    if (e->prog == p && e->serial == p->serial && e->stage == stage && e->valid) { *out = e->hash; return 1; }
+    const uint8_t *ctl, *code;
+    uint32_t len;
+    if (!find_stage(p, stage, &ctl, &code, &len) || !ctl || !code || !len || len > (16u << 20)) return 0;
+    uint32_t ctl_len;
+    memcpy(&ctl_len, ctl + 0x20, sizeof ctl_len);
+    if (ctl_len < 0x7cc || ctl_len >= 0x880) ctl_len = 0x880;
+    if ((uint64_t)ctl_len + len > SIZE_MAX) return 0;
+    size_t total = (size_t)ctl_len + len;
+    uint8_t *bytes = malloc(total);
+    if (!bytes) return 0;
+    uint8_t digest[32];
+    memcpy(bytes, ctl, ctl_len);
+    memcpy(bytes + ctl_len, code, len);
+    rt_sha256(bytes, total, digest);
+    free(bytes);
+    *out = (uint32_t)digest[0] << 24 | (uint32_t)digest[1] << 16 | (uint32_t)digest[2] << 8 | digest[3];
+    *e = (typeof(cache[0])){p, p->serial, stage, 1, *out};
+    return 1;
+}
+
+// The first nine 1.4.3 UI vertex-shader hashes from MacNativeGames' TOTK UI safe-area reference.
+static int ui_vertex_shader(const prog_t *p, uint32_t *hash) {
+    static const uint32_t known[] = {0x7f2113e2, 0xe9fd7b43, 0xa62ee313, 0x16684efc, 0x3e11cee5,
+                                     0x48c18ae6, 0x35cbc686, 0x4872bec9, 0x9f47ed90};
+    uint32_t source_hash;
+    if (!ui_original_shader_hash(p, NVN_STAGE_VS, &source_hash)) return 0;
+    if (hash) *hash = source_hash;
+    for (size_t i = 0; i < sizeof known / sizeof *known; i++) if (source_hash == known[i]) return 1;
+    return 0;
+}
+
+static int ui_scissor_matches(VkRect2D a, VkRect2D b) {
+    return a.offset.x == b.offset.x && a.offset.y == b.offset.y && a.extent.width == b.extent.width &&
+           a.extent.height == b.extent.height;
+}
+
+// The known game HUD shaders and six-index alpha-blended, depth-independent overlay quads share the same wide canvas.
+// A clipped sibling may use a different blend mode: accept it only when the same pass and exact scissor already contain
+// a corrected UI draw. This keeps backplates and map markers with their widget while leaving full-output world overlays
+// alone. The viewport correction reverses the game's wide-canvas stretch about the physical output centre.
+static int ui_safe_area_draw(const VkExec *ex, int32_t count, unsigned *out_w, double *x_scale) {
+    VkExec *capture = (VkExec *)ex;
+    int recording = vk_ui_capture_recording();
+    int shader_known = 0, shader_available = 0, fragment_available = 0;
+    uint32_t vs_hash = 0, fs_hash = 0;
+    if (recording) {
+        shader_available = ui_original_shader_hash(ex->prog, NVN_STAGE_VS, &vs_hash);
+        fragment_available = ui_original_shader_hash(ex->prog, NVN_STAGE_FS, &fs_hash);
+        shader_known = shader_available && ui_vertex_shader(ex->prog, NULL);
+        capture->capture_original_vs = vs_hash;
+        capture->capture_has_original_vs = shader_available;
+        capture->capture_has_original_fs = fragment_available;
+        capture->capture_original_fs = fs_hash;
+        capture->capture_ui_class = shader_known ? VK_UI_CLASS_HUD : VK_UI_CLASS_NOT_HUD;
+        capture->capture_ui_match_reason = !shader_available ? VK_UI_MATCH_SHADER_UNAVAILABLE
+                                               : shader_known ? VK_UI_MATCH_KNOWN_HUD_SHADER
+                                                              : VK_UI_MATCH_SHADER_NOT_MATCHED;
+        capture->capture_safe_area_applied = 0;
+        capture->capture_safe_area_reason = VK_UI_SAFE_AREA_INDEX_COUNT;
+    }
+    if (count != 6) return 0;
+    unsigned output[2];
+    double safe[4];
+    if (!res_ui_safe_area(output, safe, x_scale)) {
+        if (recording) capture->capture_safe_area_reason = VK_UI_SAFE_AREA_UNAVAILABLE;
+        return 0;
+    }
+    if (ex->pass_w != output[0] || ex->pass_h != output[1]) {
+        if (recording) capture->capture_safe_area_reason = VK_UI_SAFE_AREA_PASS_SIZE;
+        return 0;
+    }
+    if (!recording) {
+        shader_available = ui_original_shader_hash(ex->prog, NVN_STAGE_VS, &vs_hash);
+        shader_known = shader_available && ui_vertex_shader(ex->prog, NULL);
+    }
+    int known = shader_known;
+    const blend_st *blend = &ex->pipe.blend[0];
+    VkRect2D scissor = vk_exec_scissor(ex);
+    int shared_clipped_scissor = ex->ui_safe_scissor_valid && ex->ui_safe_pass_serial == ex->pass_serial &&
+                                 ui_scissor_matches(scissor, ex->ui_safe_scissor) &&
+                                 (scissor.offset.x || scissor.offset.y || scissor.extent.width != output[0] ||
+                                  scissor.extent.height != output[1]);
+    int full_output_scissor = !scissor.offset.x && !scissor.offset.y && scissor.extent.width == output[0] &&
+                              scissor.extent.height == output[1];
+    int confirmation_pair_context = ex->ui_squeezed && ex->ui_safe_scissor_valid &&
+                                    ex->ui_safe_pass_serial == ex->pass_serial && full_output_scissor &&
+                                    ui_scissor_matches(scissor, ex->ui_safe_scissor) && count == 6 &&
+                                    ex->ui_safe_index_count == 6 && ex->ui_safe_color_target == ex->color[0].image &&
+                                    (ex->pipe.color.blend_en & 1) &&
+                                    blend->src_rgb == NVN_BLEND_FUNC_DST_COLOR &&
+                                    blend->dst_rgb == NVN_BLEND_FUNC_SRC_ALPHA &&
+                                    blend->src_a == NVN_BLEND_FUNC_DST_COLOR && blend->dst_a == NVN_BLEND_FUNC_SRC_ALPHA &&
+                                    blend->eq_rgb == NVN_BLEND_EQUATION_ADD && blend->eq_a == NVN_BLEND_EQUATION_ADD;
+    if (!fragment_available && confirmation_pair_context && shader_available && vs_hash == 0xa662e313)
+        fragment_available = ui_original_shader_hash(ex->prog, NVN_STAGE_FS, &fs_hash);
+    int confirmation_full_scissor_sibling = ex->ui_squeezed && ex->ui_safe_scissor_valid &&
+                                            ex->ui_safe_pass_serial == ex->pass_serial && full_output_scissor &&
+                                            ui_scissor_matches(scissor, ex->ui_safe_scissor) && count == 6 &&
+                                            shader_available && fragment_available && vs_hash == 0xa662e313 &&
+                                            fs_hash == 0xb3b3a670 && ex->ui_safe_prog_serial == ex->prog->serial &&
+                                            ex->ui_safe_vs_hash == vs_hash && ex->ui_safe_fs_hash == fs_hash &&
+                                            ex->ui_safe_index_count == 6 && ex->ui_safe_color_target == ex->color[0].image;
+    int normal_alpha = blend->src_rgb == NVN_BLEND_FUNC_SRC_ALPHA &&
+                       blend->dst_rgb == NVN_BLEND_FUNC_ONE_MINUS_SRC_ALPHA;
+    int sibling_alpha = (blend->src_rgb == NVN_BLEND_FUNC_SRC_ALPHA &&
+                         (blend->dst_rgb == NVN_BLEND_FUNC_ONE || blend->dst_rgb == NVN_BLEND_FUNC_ONE_MINUS_SRC_ALPHA)) ||
+                        (blend->src_rgb == NVN_BLEND_FUNC_DST_COLOR && blend->dst_rgb == NVN_BLEND_FUNC_SRC_ALPHA);
+    int confirmation_blend = blend->src_rgb == NVN_BLEND_FUNC_DST_COLOR && blend->dst_rgb == NVN_BLEND_FUNC_SRC_ALPHA &&
+                             blend->src_a == NVN_BLEND_FUNC_DST_COLOR && blend->dst_a == NVN_BLEND_FUNC_SRC_ALPHA &&
+                             blend->eq_a == NVN_BLEND_EQUATION_ADD;
+    int overlay_quad = ex->pass_ncolor && ex->color[0].image && ex->color[0].width == output[0] &&
+                       ex->color[0].height == output[1] && ex->pass_depth == VK_FORMAT_UNDEFINED && !ex->pipe.ds.dt &&
+                       !ex->pipe.ds.dw && (ex->pipe.color.blend_en & 1) && blend->eq_rgb == NVN_BLEND_EQUATION_ADD &&
+                       (normal_alpha || (shared_clipped_scissor && sibling_alpha) ||
+                        (confirmation_full_scissor_sibling && confirmation_blend));
+    if (!known && !overlay_quad) {
+        if (recording) capture->capture_safe_area_reason = VK_UI_SAFE_AREA_DRAW_STATE;
+        return 0;
+    }
+    *out_w = output[0];
+    if (*x_scale <= 1.001) {
+        if (recording) capture->capture_safe_area_reason = VK_UI_SAFE_AREA_ASPECT;
+        return 0;
+    }
+    if (recording) {
+        if (overlay_quad && !known) {
+            capture->capture_ui_class = VK_UI_CLASS_OVERLAY_QUAD;
+            capture->capture_ui_match_reason = VK_UI_MATCH_OVERLAY_QUAD_STATE;
+        }
+        capture->capture_safe_area_applied = 1, capture->capture_safe_area_reason = VK_UI_SAFE_AREA_APPLIED;
+    }
     return 1;
 }
 
@@ -1666,20 +1811,57 @@ static void bind_pipeline(VkExec *ex, VkPipelineBindPoint bp, VkPipeline p) {
     if (!k) B.st_valid = 0;
 }
 
-static void record_fixed(VkExec *ex) {
+static VkViewport fixed_viewport(const VkExec *ex, int ui_squeeze, unsigned output_w, double x_scale) {
+    float x = 0, y = 0, w = (float)ex->pass_w, h = (float)ex->pass_h;
+    if (ex->has_vp) x = ex->vp[0][0], y = ex->vp[0][1], w = ex->vp[0][2], h = ex->vp[0][3];
+    if (ui_squeeze) {
+        float cx = output_w * 0.5f;
+        x = cx + (x - cx) / (float)x_scale;
+        w /= (float)x_scale;
+    }
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    return (VkViewport){x, y + h, w, -h, ex->depth_range[0], ex->depth_range[1]}; // Vulkan viewport's y flip
+}
+
+static VkRect2D fixed_scissor(const VkExec *ex, int ui_squeeze, unsigned output_w, double x_scale) {
+    VkRect2D r = vk_exec_scissor(ex);
+    if (ui_squeeze && r.extent.width) {
+        double cx = output_w * 0.5;
+        double x0 = cx + ((double)r.offset.x - cx) / x_scale;
+        double x1 = cx + ((double)r.offset.x + r.extent.width - cx) / x_scale;
+        int64_t ix0 = (int64_t)floor(x0), ix1 = (int64_t)ceil(x1);
+        if (ix0 < 0) ix0 = 0;
+        if (ix1 > (int64_t)ex->pass_w) ix1 = ex->pass_w;
+        r.offset.x = (int32_t)ix0;
+        r.extent.width = ix1 > ix0 ? (uint32_t)(ix1 - ix0) : 0;
+    }
+    return r;
+}
+
+static void record_fixed(VkExec *ex, int ui_squeeze, unsigned output_w, double x_scale) {
     VkCommandBuffer cb = ex->cb;
+    int capture = vk_ui_capture_recording();
+    VkViewport before_v = {0}, after_v = {0};
+    VkRect2D before_s = {{0, 0}, {0, 0}}, after_s = {{0, 0}, {0, 0}};
+    if (capture || (ex->dirty & VK_EXEC_DIRTY_VIEWPORT)) {
+        before_v = fixed_viewport(ex, 0, output_w, x_scale);
+        after_v = fixed_viewport(ex, ui_squeeze, output_w, x_scale);
+    }
+    if (capture || (ex->dirty & VK_EXEC_DIRTY_SCISSOR)) {
+        before_s = fixed_scissor(ex, 0, output_w, x_scale);
+        after_s = fixed_scissor(ex, ui_squeeze, output_w, x_scale);
+    }
+    if (capture) {
+        ex->capture_viewport_before = before_v, ex->capture_viewport_after = after_v;
+        ex->capture_scissor_before = before_s, ex->capture_scissor_after = after_s;
+    }
     if (ex->dirty & VK_EXEC_DIRTY_VIEWPORT) {
-        float x = 0, y = 0, w = (float)ex->pass_w, h = (float)ex->pass_h;
-        if (ex->has_vp) x = ex->vp[0][0], y = ex->vp[0][1], w = ex->vp[0][2], h = ex->vp[0][3];
-        if (w < 1) w = 1;
-        if (h < 1) h = 1;
-        VkViewport v = {x, y + h, w, -h, ex->depth_range[0], ex->depth_range[1]};   // the y flip: negative height
-        vkCmdSetViewportWithCount(cb, 1, &v);
+        vkCmdSetViewportWithCount(cb, 1, &after_v);
         ex->recorded++;
     }
     if (ex->dirty & VK_EXEC_DIRTY_SCISSOR) {
-        VkRect2D r = vk_exec_scissor(ex);
-        vkCmdSetScissorWithCount(cb, 1, &r);
+        vkCmdSetScissorWithCount(cb, 1, &after_s);
         ex->recorded++;
     }
     if (ex->dirty & VK_EXEC_DIRTY_DEPTH_BIAS) {
@@ -1862,6 +2044,20 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
         if (fs_wait) fs = shader_for(ex, NVN_STAGE_FS, &has_fs, NULL, 1);
     }
     if (!vs || (has_fs && !fs)) return 0;
+    unsigned ui_output_w = 0;
+    double ui_x_scale = 1.0;
+    int ui_squeeze = ui_safe_area_draw(ex, count, &ui_output_w, &ui_x_scale);
+    if (ex->ui_squeezed != ui_squeeze) ex->dirty |= VK_EXEC_DIRTY_VIEWPORT | VK_EXEC_DIRTY_SCISSOR;
+    if (ui_squeeze) {
+        ex->ui_safe_pass_serial = ex->pass_serial;
+        ex->ui_safe_scissor = vk_exec_scissor(ex);
+        ex->ui_safe_scissor_valid = 1;
+        ex->ui_safe_prog_serial = ex->prog->serial;
+        ui_original_shader_hash(ex->prog, NVN_STAGE_VS, &ex->ui_safe_vs_hash);
+        ui_original_shader_hash(ex->prog, NVN_STAGE_FS, &ex->ui_safe_fs_hash);
+        ex->ui_safe_index_count = count;
+        ex->ui_safe_color_target = ex->color[0].image;
+    }
     uint32_t fbl = feedback_prepare(ex, fs);
     VkPipeState s = ex->pipe;
     s.vs = vs, s.fs = fs;
@@ -1932,7 +2128,17 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
         ex->recorded++;
         B.st = s, B.st_valid = 1;
     }
-    record_fixed(ex);
+    record_fixed(ex, ui_squeeze, ui_output_w, ui_x_scale);
+    ex->ui_squeezed = ui_squeeze;
+    if (ui_squeeze) {
+        static volatile long logged;
+        if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED)) {
+            double safe_w = ui_output_w / ui_x_scale;
+            rt_log("ultrawide UI: HUD viewport/scissor correction active, pass %ux%u, centered 16:9 safe area %.0fx%u at x=%.0f (x squeeze %.6f)",
+                   ex->pass_w, ex->pass_h, safe_w, ex->pass_h, (ui_output_w - safe_w) * 0.5, ui_x_scale);
+        }
+    }
+    if (vk_ui_capture_recording()) ex->capture_pipe = s, ex->capture_pipeline = p;
     repeat_stats(ex, info);
     bind_resources(ex, info);
     if (fbl & ex->fb_dirty) feedback_barrier(ex);
@@ -1979,6 +2185,7 @@ static void op_draw(VkExec *ex, const p_draw *d) {
         vkCmdDraw(ex->cb, n, inst, first, (uint32_t)d->base_instance);
     }
     ex->recorded++;
+    vk_ui_capture_draw(ex, VK_UI_DRAW_ARRAYS, 0, n, inst, first, 0);
 }
 
 // Primitive restart of an indexed draw. NVN restarts strips wherever an index equals the SetPrimitiveRestart value;
@@ -2034,6 +2241,8 @@ static void op_draw_idx(VkExec *ex, const p_draw_idx *d) {
     vkCmdDrawIndexed(ex->cb, (uint32_t)d->count, d->instances > 0 ? (uint32_t)d->instances : 1, 0, d->base_vertex,
                      (uint32_t)d->base_instance);
     ex->recorded++;
+    vk_ui_capture_draw(ex, VK_UI_DRAW_INDEXED, (uint32_t)d->count, -1,
+                       d->instances > 0 ? (uint32_t)d->instances : 1, 0, d->base_vertex);
 }
 
 // DrawElementsIndirect: the arguments are read by the GPU from the pool buffer (they are often written by an earlier
@@ -2055,6 +2264,7 @@ static void op_draw_idx_ind(VkExec *ex, const p_draw_idx_ind *d) {
     vkCmdBindIndexBuffer(ex->cb, ib.buffer, ib.offset, d->itype == NVN_INDEX_TYPE_UNSIGNED_SHORT ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
     vkCmdDrawIndexedIndirect(ex->cb, ip.buffer, ip.offset, 1, sizeof(VkDrawIndexedIndirectCommand));
     ex->recorded += 2;
+    vk_ui_capture_draw(ex, VK_UI_DRAW_INDIRECT, 0, -1, 0, 0, 0);
     vk_mem_count(ip.cls, VK_MUSE_IND, sizeof(VkDrawIndexedIndirectCommand));
     VK_MEM_BOUND(ip);
     VK_MEM_BOUND(ib);

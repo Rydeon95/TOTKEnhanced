@@ -434,6 +434,7 @@ void vk_exec_pass_begin(VkExec *ex) {
     ex->fbl_mask = fbl;
     ex->fb_dirty = 0;
     ex->pass_serial++;
+    ex->ui_safe_scissor_valid = 0;
     VkRenderingAttachmentInfo ca[8], da = {0}, sa = {0};
     for (uint32_t i = 0; i < ex->pass_ncolor; i++) {
         const VkExecTarget *t = &ex->color[i];
@@ -457,6 +458,7 @@ void vk_exec_pass_begin(VkExec *ex) {
                           .pColorAttachments = ca,
                           .pDepthAttachment = ex->pass_depth ? &da : NULL,
                           .pStencilAttachment = ex->pass_stencil ? &sa : NULL};
+    vk_ui_capture_pass_begin(ex);
     vkCmdBeginRendering(ex->cb, &ri);
     vk_exec_frame.passes++;
     ex->recorded++;
@@ -738,6 +740,7 @@ int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint64_t 
     ex->recorded = 0;
     ex->in_pass = 0;
     ex->dirty = VK_EXEC_DIRTY_ALL;
+    ex->ui_squeezed = 0;
     ex->rt_resolved = 0;   // images may have changed since the last command buffer
     ex->nviews = 0;
     ex->barrier_at = -1;

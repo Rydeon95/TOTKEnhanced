@@ -10,6 +10,7 @@ set cloth    TOTK_CLOTH_REALTIME 1
 set bounce   TOTK_HIGHFPS_FIX    1
 set output   TOTK_PATCH_OUTPUT   0
 set scene    TOTK_PATCH_SCENE    0
+set ultrawide TOTK_ULTRAWIDE     0
 
 # 60 fps: the adaptive present-interval controller (main+0x2db174, 1.2.1 0x8f26c8) gets the minimum interval 1.
 site fps60 main 2db204 6b08015f 7100055f   # clamp: cmp w10, #1 (was cmp w10, w8 = minimum)
@@ -60,6 +61,13 @@ site scene main 585e48 1e220160 @page:x3    # scvtf s0, w11 -> adrp x3, page
 site scene main 585e50 bd0cc660 2d420460    # str s0, [x19, #0xcc4] -> ldp s0, s1, [x3, #16]
 site scene main 585e54 1e220140 bd0cc660    # scvtf s0, w10 -> str s0, [x19, #0xcc4]
 site scene main 585e60 bd0cca60 bd0cca61    # str s0, [x19, #0xcc8] -> str s1, [x19, #0xcc8]
+
+# Camera projection aspect. The game's camera constructors copy a fixed 16:9 default into the projection at both sites;
+# runtime/resolution.c supplies output width / height on the patch page. The other camera aspect sites divide their live
+# width and height and already follow the output size. The projection keeps its vertical FOV, so wider output reveals
+# more world at the sides. Its view-projection data also feeds the camera's frustum calculations.
+site ultrawide main 628c74 bd414260 @page:x9 bd403920  # ldr s0, [x19, #0x140] -> ldr s0, [page, #56]
+site ultrawide main b43460 bd406ac0 @page:x9 bd403920  # ldr s0, [x22, #0x68] -> ldr s0, [page, #56]
 
 # The game's zstd decoder (BSD zstd, statically linked into main) through the host's libzstd (runtime/ov_zstd.c):
 # every call of ZSTD_decompressMultiFrame (main+0x3a1f0: dctx, dst, capacity, src, size, dict, dict size, ddict) and of

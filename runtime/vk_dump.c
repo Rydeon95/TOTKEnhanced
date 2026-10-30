@@ -928,3 +928,233 @@ void vk_dump_present(uint64_t frame) {
     rt_log("vk_dump: frame %llu: %d passes and dispatches, about %llu MB of PNGs in %s", (unsigned long long)frame, seq,
            (unsigned long long)(png_bytes >> 20), dir);
 }
+
+// The request, replay operations and present callback are serialized by the backend: synchronous replay uses the game
+// thread; asynchronous replay uses its single replay thread. A request found at Present N is armed there, and capture
+// begins on the first pass of frame N+1. The Present for N+1 closes that complete frame.
+enum { UI_CAP_IDLE, UI_CAP_ARMED, UI_CAP_FRAME };
+static int ui_cap_state;
+static FILE *ui_cap_summary, *ui_cap_draws, *ui_cap_passes;
+static char ui_cap_request[MAX_PATH], ui_cap_dir[MAX_PATH * 2];
+static char ui_cap_label[49] = "capture";
+static uint64_t ui_cap_frame, ui_cap_draw_total;
+static uint32_t ui_cap_pass_total, ui_cap_pass_draw;
+
+static int ui_cap_exe_dir(char *out, size_t cap) {
+    char exe[MAX_PATH];
+    DWORD n = GetModuleFileNameA(NULL, exe, sizeof exe);
+    if (!n || n >= sizeof exe) return 0;
+    char *slash = strrchr(exe, '\\');
+    if (!slash) return 0;
+    *slash = 0;
+    if (snprintf(out, cap, "%s", exe) >= (int)cap) return 0;
+    return 1;
+}
+
+static uint64_t ui_cap_shader_hash(const GfxShader *s) {
+    static struct { const GfxShader *shader; uint64_t hash; } cache[1024];
+    static unsigned next;
+    if (!s) return 0;
+    for (unsigned i = 0; i < 1024; i++) if (cache[i].shader == s) return cache[i].hash;
+    uint64_t words = 0, hash = 0xcbf29ce484222325ull;
+    const uint32_t *spirv = gfx_shader_spirv(s, &words);
+    const uint8_t *bytes = (const uint8_t *)spirv;
+    for (uint64_t i = 0; i < words * 4; i++) hash = (hash ^ bytes[i]) * 0x100000001b3ull;
+    cache[next] = (typeof(cache[0])){s, hash};
+    next = (next + 1) & 1023;
+    return hash;
+}
+
+static void ui_cap_read_label(void) {
+    strcpy(ui_cap_label, "capture");
+    FILE *f = fopen(ui_cap_request, "rb");
+    if (!f) return;
+    char raw[128];
+    size_t n = fread(raw, 1, sizeof raw, f);
+    fclose(f);
+    size_t out = 0;
+    for (size_t i = 0; i < n && out < sizeof ui_cap_label - 1; i++) {
+        unsigned char c = (unsigned char)raw[i];
+        if (!c || c == '\r' || c == '\n') break;
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_')
+            ui_cap_label[out++] = (char)c;
+        else if (out && ui_cap_label[out - 1] != '-') ui_cap_label[out++] = '-';
+    }
+    while (out && (ui_cap_label[out - 1] == '-' || ui_cap_label[out - 1] == '_')) out--;
+    if (out) ui_cap_label[out] = 0;
+}
+
+static const char *ui_cap_class_name(uint8_t value) {
+    if (value == VK_UI_CLASS_HUD) return "hud";
+    if (value == VK_UI_CLASS_OVERLAY_QUAD) return "overlay_quad";
+    return "not_hud";
+}
+
+static const char *ui_cap_match_reason(uint8_t value) {
+    switch (value) {
+    case VK_UI_MATCH_KNOWN_HUD_SHADER: return "known HUD vertex shader";
+    case VK_UI_MATCH_OVERLAY_QUAD_STATE: return "output-sized alpha quad without depth";
+    case VK_UI_MATCH_SHADER_NOT_MATCHED: return "shader not matched";
+    default: return "shader unavailable";
+    }
+}
+
+static const char *ui_cap_safe_area_reason(uint8_t value) {
+    switch (value) {
+    case VK_UI_SAFE_AREA_APPLIED: return "applied";
+    case VK_UI_SAFE_AREA_INDEX_COUNT: return "index_count != 6";
+    case VK_UI_SAFE_AREA_UNAVAILABLE: return "safe area unavailable";
+    case VK_UI_SAFE_AREA_PASS_SIZE: return "pass size != output";
+    case VK_UI_SAFE_AREA_SHADER: return "shader not matched";
+    case VK_UI_SAFE_AREA_ASPECT: return "aspect not ultrawide";
+    case VK_UI_SAFE_AREA_DRAW_STATE: return "not an output-sized alpha quad without depth";
+    default: return "unknown";
+    }
+}
+
+static void ui_cap_viewport(char *out, size_t cap, VkViewport v) {
+    snprintf(out, cap, "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f", v.x, v.y, v.width, v.height, v.minDepth, v.maxDepth);
+}
+
+static void ui_cap_scissor(char *out, size_t cap, VkRect2D r) {
+    snprintf(out, cap, "%d,%d,%u,%u", r.offset.x, r.offset.y, r.extent.width, r.extent.height);
+}
+
+static int ui_cap_create_files(uint64_t frame) {
+    char exe_dir[MAX_PATH], logs[MAX_PATH * 2], base[MAX_PATH * 2];
+    if (!ui_cap_exe_dir(exe_dir, sizeof exe_dir)) return 0;
+    if (snprintf(ui_cap_request, sizeof ui_cap_request, "%s\\ui_capture.request", exe_dir) >= sizeof ui_cap_request ||
+        snprintf(logs, sizeof logs, "%s\\logs", exe_dir) >= sizeof logs) return 0;
+    CreateDirectoryA(logs, NULL);
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    if (snprintf(base, sizeof base, "%s\\ui-capture-%04u%02u%02u-%02u%02u%02u-%s", logs, st.wYear, st.wMonth, st.wDay,
+                 st.wHour, st.wMinute, st.wSecond, ui_cap_label) >= sizeof base) return 0;
+    for (unsigned suffix = 0; suffix < 100; suffix++) {
+        int n = suffix ? snprintf(ui_cap_dir, sizeof ui_cap_dir, "%s-%02u", base, suffix)
+                       : snprintf(ui_cap_dir, sizeof ui_cap_dir, "%s", base);
+        if (n < 0 || n >= sizeof ui_cap_dir) return 0;
+        if (CreateDirectoryA(ui_cap_dir, NULL)) break;
+        if (GetLastError() != ERROR_ALREADY_EXISTS || suffix == 99) return 0;
+    }
+    char path[MAX_PATH * 2];
+    if (snprintf(path, sizeof path, "%s\\summary.txt", ui_cap_dir) >= sizeof path ||
+        !(ui_cap_summary = fopen(path, "w"))) return 0;
+    if (snprintf(path, sizeof path, "%s\\draws.tsv", ui_cap_dir) >= sizeof path || !(ui_cap_draws = fopen(path, "w"))) return 0;
+    if (snprintf(path, sizeof path, "%s\\passes.tsv", ui_cap_dir) >= sizeof path || !(ui_cap_passes = fopen(path, "w"))) return 0;
+    fprintf(ui_cap_draws,
+            "global_draw\tpass\tdraw\tkind\tindexed\tindex_count\tvertex_count\tinstances\tfirst\tvertex_offset\ttopology"
+            "\toriginal_vs\toriginal_fs\tvs_hash\tfs_hash\tpipeline\tui_class\tui_match_reason\tsafe_area_applied"
+            "\tsafe_area_reason\tviewport\tscissor\tviewport_before\tviewport_after\tscissor_before\tscissor_after"
+            "\tcolor_target\tcolor_wh\tcolor_format\tdepth_target\tdepth_wh\tdepth_format\tblend\tblend_factors\tdepth_test"
+            "\tdepth_write\n");
+    fprintf(ui_cap_passes, "pass\tframe\twidth\theight\tcolor_targets\tcolor_formats\tdepth_target\tdepth_wh\tdepth_format\tviewport\tscissor\n");
+    ui_cap_frame = frame;
+    ui_cap_draw_total = 0;
+    ui_cap_pass_total = ui_cap_pass_draw = 0;
+    return 1;
+}
+
+static void ui_cap_close(uint64_t frame) {
+    if (ui_cap_summary) {
+        unsigned out[2]; double safe[4], scale;
+        res_ui_safe_area(out, safe, &scale);
+        double aspect = out[1] ? (double)out[0] / out[1] : 0.0;
+        SYSTEMTIME st; GetLocalTime(&st);
+        fprintf(ui_cap_summary, "label = %s\ngame_version=%s\nframe=%llu\noutput=%ux%u\noutput_resolution=%ux%u\n"
+                                "aspect_ratio=%.9f\nsafe_area_width=%.0f\nsafe_area_height=%.0f\nsafe_left=%.0f\n"
+                                "safe_area=%.0fx%.0f +%.0fx%.0f\npasses=%u\ndraws=%llu\n"
+                                "timestamp=%04u-%02u-%02uT%02u:%02u:%02u\n",
+                ui_cap_label, RT_V143 ? "1.4.3" : "1.2.1", (unsigned long long)frame, out[0], out[1], out[0], out[1],
+                aspect, safe[2], safe[3], safe[0], safe[2], safe[3], safe[0], safe[1], ui_cap_pass_total,
+                (unsigned long long)ui_cap_draw_total, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        fclose(ui_cap_summary); ui_cap_summary = NULL;
+    }
+    if (ui_cap_draws) fclose(ui_cap_draws), ui_cap_draws = NULL;
+    if (ui_cap_passes) fclose(ui_cap_passes), ui_cap_passes = NULL;
+    ui_cap_state = UI_CAP_IDLE;
+    rt_log("ui capture complete: %s (frame %llu)", ui_cap_dir, (unsigned long long)frame);
+}
+
+void vk_ui_capture_present(uint64_t frame) {
+    if (ui_cap_state == UI_CAP_FRAME) ui_cap_close(frame);
+    if (ui_cap_state != UI_CAP_IDLE) return;
+    char exe_dir[MAX_PATH];
+    if (!ui_cap_exe_dir(exe_dir, sizeof exe_dir)) return;
+    if (snprintf(ui_cap_request, sizeof ui_cap_request, "%s\\ui_capture.request", exe_dir) >= sizeof ui_cap_request ||
+        GetFileAttributesA(ui_cap_request) == INVALID_FILE_ATTRIBUTES) return;
+    ui_cap_read_label();
+    if (!DeleteFileA(ui_cap_request)) {
+        rt_log("ui capture: request exists but could not be consumed");
+        return;
+    }
+    ui_cap_state = UI_CAP_ARMED;
+    rt_log("ui capture armed: %s", ui_cap_label);
+}
+
+void vk_ui_capture_pass_begin(VkExec *ex) {
+    if (ui_cap_state == UI_CAP_ARMED) {
+        if (!ui_cap_create_files(__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 1)) {
+            ui_cap_state = UI_CAP_IDLE;
+            rt_log("ui capture: could not create output files");
+            return;
+        }
+        ui_cap_state = UI_CAP_FRAME;
+    }
+    if (ui_cap_state != UI_CAP_FRAME || !ui_cap_passes) return;
+    uint32_t pass = ui_cap_pass_total++;
+    ui_cap_pass_draw = 0;
+    VkViewport vp = {0, 0, (float)ex->pass_w, (float)ex->pass_h, 0, 1};
+    if (ex->has_vp) vp = (VkViewport){ex->vp[0][0], ex->vp[0][1], ex->vp[0][2], ex->vp[0][3], ex->vp[0][4], ex->vp[0][5]};
+    VkRect2D sc = vk_exec_scissor(ex);
+    fprintf(ui_cap_passes, "%u\t%llu\t%u\t%u\t", pass, (unsigned long long)ui_cap_frame, ex->pass_w, ex->pass_h);
+    int first = 1;
+    for (uint32_t i = 0; i < ex->pass_ncolor; i++) if (ex->color[i].tex) {
+        fprintf(ui_cap_passes, "%s%llu", first ? "" : ",", (unsigned long long)ex->color[i].tex->serial); first = 0;
+    }
+    fprintf(ui_cap_passes, "\t"); first = 1;
+    for (uint32_t i = 0; i < ex->pass_ncolor; i++) if (ex->color[i].tex) {
+        fprintf(ui_cap_passes, "%s%d", first ? "" : ",", ex->color[i].format); first = 0;
+    }
+    fprintf(ui_cap_passes, "\t%llu\t%ux%u\t%d\t%.3f,%.3f,%.3f,%.3f\t%d,%d,%u,%u\n",
+            (unsigned long long)(ex->depth.tex ? ex->depth.tex->serial : 0), ex->depth.width, ex->depth.height, ex->depth.format,
+            vp.x, vp.y, vp.width, vp.height, sc.offset.x, sc.offset.y, sc.extent.width, sc.extent.height);
+}
+
+int vk_ui_capture_recording(void) { return ui_cap_state == UI_CAP_FRAME; }
+
+void vk_ui_capture_draw(VkExec *ex, int kind, uint32_t index_count, int64_t vertex_count, uint32_t instances,
+                        uint32_t first, int32_t vertex_offset) {
+    if (ui_cap_state != UI_CAP_FRAME || !ui_cap_draws) return;
+    const VkPipeState *s = &ex->capture_pipe;
+    VkViewport vp = {0, 0, (float)ex->pass_w, (float)ex->pass_h, 0, 1};
+    if (ex->has_vp) vp = (VkViewport){ex->vp[0][0], ex->vp[0][1], ex->vp[0][2], ex->vp[0][3], ex->vp[0][4], ex->vp[0][5]};
+    VkRect2D sc = vk_exec_scissor(ex);
+    const VkExecTarget *c = ex->pass_ncolor ? &ex->color[0] : NULL, *d = &ex->depth;
+    blend_st b = s->blend[0];
+    const char *name = kind == VK_UI_DRAW_ARRAYS ? "arrays" : kind == VK_UI_DRAW_INDEXED ? "indexed" : "indexed_indirect";
+    char original_vs[9], original_fs[9], vp_before[128], vp_after[128], sc_before[64], sc_after[64];
+    if (ex->capture_has_original_vs) snprintf(original_vs, sizeof original_vs, "%08x", ex->capture_original_vs);
+    else strcpy(original_vs, "-");
+    if (ex->capture_has_original_fs) snprintf(original_fs, sizeof original_fs, "%08x", ex->capture_original_fs);
+    else strcpy(original_fs, "-");
+    ui_cap_viewport(vp_before, sizeof vp_before, ex->capture_viewport_before);
+    ui_cap_viewport(vp_after, sizeof vp_after, ex->capture_viewport_after);
+    ui_cap_scissor(sc_before, sizeof sc_before, ex->capture_scissor_before);
+    ui_cap_scissor(sc_after, sizeof sc_after, ex->capture_scissor_after);
+    fprintf(ui_cap_draws, "%06llu\t%u\t%06u\t%s\t%d\t%u\t%lld\t%u\t%u\t%d\t%u\t%s\t%s\t%016llx\t%016llx\t"
+                          "%016llx\t%s\t%s\t%u\t%s\t%.3f,%.3f,%.3f,%.3f\t%d,%d,%u,%u\t%s\t%s\t%s\t%s\t"
+                          "%llu\t%ux%u\t%d\t%llu\t%ux%u\t%d\t%u\t%u,%u,%u,%u,%u,%u\t%u\t%u\n",
+            (unsigned long long)++ui_cap_draw_total, ui_cap_pass_total - 1, ui_cap_pass_draw++, name,
+            kind != VK_UI_DRAW_ARRAYS, index_count, (long long)vertex_count, instances, first, vertex_offset,
+            vk_pipeline_topology(s->prim), original_vs, original_fs, (unsigned long long)ui_cap_shader_hash(s->vs),
+            (unsigned long long)ui_cap_shader_hash(s->fs), (unsigned long long)(uintptr_t)ex->capture_pipeline,
+            ui_cap_class_name(ex->capture_ui_class), ui_cap_match_reason(ex->capture_ui_match_reason),
+            ex->capture_safe_area_applied, ui_cap_safe_area_reason(ex->capture_safe_area_reason),
+            vp.x, vp.y, vp.width, vp.height, sc.offset.x, sc.offset.y, sc.extent.width, sc.extent.height,
+            vp_before, vp_after, sc_before, sc_after,
+            (unsigned long long)(c && c->tex ? c->tex->serial : 0), c ? c->width : 0, c ? c->height : 0, c ? c->format : 0,
+            (unsigned long long)(d->tex ? d->tex->serial : 0), d->width, d->height, d->format, s->color.blend_en,
+            (unsigned)b.src_rgb, (unsigned)b.dst_rgb, (unsigned)b.eq_rgb, (unsigned)b.src_a, (unsigned)b.dst_a, (unsigned)b.eq_a,
+            (unsigned)s->ds.dt, (unsigned)s->ds.dw);
+}

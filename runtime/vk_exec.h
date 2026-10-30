@@ -22,6 +22,29 @@ enum {
     VK_EXEC_DIRTY_ALL = (1 << 5) - 1,
 };
 
+enum {
+    VK_UI_CLASS_NOT_HUD,
+    VK_UI_CLASS_HUD,
+    VK_UI_CLASS_OVERLAY_QUAD,
+};
+
+enum {
+    VK_UI_MATCH_SHADER_UNAVAILABLE,
+    VK_UI_MATCH_SHADER_NOT_MATCHED,
+    VK_UI_MATCH_KNOWN_HUD_SHADER,
+    VK_UI_MATCH_OVERLAY_QUAD_STATE,
+};
+
+enum {
+    VK_UI_SAFE_AREA_APPLIED,
+    VK_UI_SAFE_AREA_INDEX_COUNT,
+    VK_UI_SAFE_AREA_UNAVAILABLE,
+    VK_UI_SAFE_AREA_PASS_SIZE,
+    VK_UI_SAFE_AREA_SHADER,
+    VK_UI_SAFE_AREA_ASPECT,
+    VK_UI_SAFE_AREA_DRAW_STATE,
+};
+
 // One render target of OP_SET_RT, resolved to its vk_texture.c image for the current command buffer.
 typedef struct {
     const tex_t *tex;                    // payload copy (lives for the run); NULL: no target in this slot
@@ -62,6 +85,14 @@ typedef struct VkExec {
     int has_vp;                          // a viewport was set; else the render area
     p_scissor scissor;                   // OP_SCISSOR (scissor 0)
     int has_scissor;                     // a scissor was set; else unbounded
+    int ui_squeezed;                     // last recorded viewport/scissor used the 16:9 HUD safe-area correction
+    uint32_t ui_safe_pass_serial;        // pass containing the last safe-area draw, for clipped sibling layers
+    VkRect2D ui_safe_scissor;            // scissor shared by that corrected UI layer
+    int ui_safe_scissor_valid;
+    uint64_t ui_safe_prog_serial;        // program/count/target signature for a narrowly paired full-scissor layer
+    uint32_t ui_safe_vs_hash, ui_safe_fs_hash;
+    int32_t ui_safe_index_count;
+    VkImage ui_safe_color_target;
     float depth_range[2];                // OP_DEPTH_RANGE: overrides the viewports' near and far
     uint32_t st_vmask[2], st_wmask[2], st_ref[2];   // OP_STENCIL per face (0 front, 1 back): compare mask, write mask, ref
     float point_size;                    // OP_BIND_STATE kind 6: NVN point size for the support buffer; 0 = never set = 1
@@ -74,6 +105,13 @@ typedef struct VkExec {
     // begin, color_fmt, depth_fmt and samples; vk_exec_draw.c owns every other field (shaders, prim, y_flip, state
     // objects, vertex input).
     VkPipeState pipe;
+    VkPipeState capture_pipe;             // state of the draw just prepared; diagnostic capture only
+    VkPipeline capture_pipeline;
+    uint32_t capture_original_vs, capture_original_fs;
+    uint8_t capture_has_original_vs, capture_has_original_fs;
+    uint8_t capture_ui_class, capture_ui_match_reason, capture_safe_area_applied, capture_safe_area_reason;
+    VkViewport capture_viewport_before, capture_viewport_after;
+    VkRect2D capture_scissor_before, capture_scissor_after;
 
     // ---- vk_exec_draw.c slots (draws, binds, dispatch): left empty by vk_exec.c
     const prog_t *prog;                  // OP_BIND_PROGRAM
@@ -155,6 +193,12 @@ void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeIn
 void vk_dump_dispatch(VkExec *ex, const GfxShader *cs, VkPipeline p, const VkPipeInfo *info, const p_dispatch *d);
 void vk_dump_copy(VkExec *ex, uint32_t op, const void *payload);   // before a copy or texture clear is replayed
 void vk_dump_present(uint64_t frame);    // vk_be_present: waits for the dump frame's copies and closes the logs
+void vk_ui_capture_present(uint64_t frame); // request detection and frame completion, ordered with replay
+int vk_ui_capture_recording(void); // cheap state check; no state copies while the capture is idle
+void vk_ui_capture_pass_begin(VkExec *ex); // after targets resolve, before vkCmdBeginRendering
+enum { VK_UI_DRAW_ARRAYS, VK_UI_DRAW_INDEXED, VK_UI_DRAW_INDIRECT };
+void vk_ui_capture_draw(VkExec *ex, int kind, uint32_t index_count, int64_t vertex_count, uint32_t instances,
+                        uint32_t first, int32_t vertex_offset); // after the actual draw command
 
 // c0, the NVN driver constant bank of one stage (vk_exec_draw.c; TOTK_FIX_C0=0 binds zeros instead): bank is
 // VK_C0_BYTES, stage an NVN stage (0 vertex, 1 fragment, 5 compute), ssbo and ubo the 16 bound slots of that stage.

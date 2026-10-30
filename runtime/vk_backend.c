@@ -103,6 +103,7 @@ void vk_present_drain(void) {
 static void present_image(const tex_t *t, const int crop[4], uint64_t at_ns, uint64_t queued, uint64_t frame,
                           uint64_t value) {
     static volatile long n_skipped;
+    vk_ui_capture_present(frame);
     vk_exec_frame_log(t, frame);
     vk_mem_census(frame);
     if (vk_dump_armed) vk_dump_present(frame);

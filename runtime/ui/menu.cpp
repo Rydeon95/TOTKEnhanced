@@ -412,7 +412,7 @@ static void row_window_size(void) {
 // The game resolution (resolution.c): 16:9 sizes from the game's own 1920x1080 up, and the current value when it is
 // another size.
 static void row_output_res(void) {
-    static const char *const vals[] = {"1920x1080", "2560x1440", "3200x1800", "3840x2160"};
+    static const char *const vals[] = {"1920x1080", "2560x1440", "3200x1800", "3440x1440", "3840x2160", "5120x2160"};
     enum { N = sizeof vals / sizeof *vals };
     char shown[N][32];
     const char *names[N];

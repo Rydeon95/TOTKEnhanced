@@ -40,7 +40,9 @@
 #define SCENE_W 1600
 #define SCENE_H 900
 #define DTA_KIB 113664u      // DynamicTextureAllocatorMem, shipped
-#define SCENE_MAX 4096       // per side, as MacNativeGames' TOTK_RENDER_RES
+#define MAX_OUTPUT_W 7680
+#define MAX_OUTPUT_H 4320
+// Let the scene reach every accepted output size; the upstream patch-tool cap of 4096 is not a Vulkan limit.
 
 static struct {
     int decided;
@@ -50,6 +52,14 @@ static struct {
     int on;                    // res_init switched the patch sets on
 } R;
 
+static int scene_dimensions(unsigned ow, unsigned oh, double scale, unsigned *sw, unsigned *sh) {
+    double want_w = ow * scale, want_h = oh * scale;
+    double fit = fmin(1.0, fmin(MAX_OUTPUT_W / want_w, MAX_OUTPUT_H / want_h));
+    *sw = (unsigned)(want_w * fit + 0.5);
+    *sh = (unsigned)(want_h * fit + 0.5);
+    return fit < 1.0;
+}
+
 static void decide(void) {
     if (R.decided) return;
     R.decided = 1;
@@ -58,7 +68,7 @@ static void decide(void) {
     const char *o = cfg_value("TOTK_OUTPUT_RES");
     unsigned w = 0, h = 0;
     char tail;
-    if (sscanf(o, "%ux%u%c", &w, &h, &tail) == 2 && w >= 1280 && h >= 720 && w <= 7680 && h <= 4320) {
+    if (sscanf(o, "%ux%u%c", &w, &h, &tail) == 2 && w >= 1280 && h >= 720 && w <= MAX_OUTPUT_W && h <= MAX_OUTPUT_H) {
         R.ow = w & ~1u;
         R.oh = h & ~1u;
     } else {
@@ -76,16 +86,33 @@ static void decide(void) {
             rt_log("resolution: TOTK_RENDER_SCALE=%s is not game or a percentage 25..400; game", s);
         }
     }
-    double sw = R.ow * k, sh = R.oh * k;
-    double fit = fmin(1.0, fmin(SCENE_MAX / sw, SCENE_MAX / sh));
-    if (fit < 1.0) R.scene_set = 1;
-    R.sw = (unsigned)(sw * fit + 0.5);
-    R.sh = (unsigned)(sh * fit + 0.5);
+    if (scene_dimensions(R.ow, R.oh, k, &R.sw, &R.sh)) R.scene_set = 1;
 }
 
 static int bigger(void) {
     decide();
     return R.ow != BASE_W || R.oh != BASE_H || R.scene_set;
+}
+
+static int ui_safe_area_for(unsigned ow, unsigned oh, double safe[4], double *x_scale) {
+    safe[0] = 0;
+    safe[1] = 0;
+    safe[2] = ow;
+    safe[3] = oh;
+    *x_scale = 1.0;
+    if ((uint64_t)ow * 9 <= (uint64_t)oh * 16) return 0;
+    safe[2] = (double)oh * (16.0 / 9.0);
+    safe[0] = ((double)ow - safe[2]) * 0.5;
+    *x_scale = (double)ow / safe[2];
+    return 1;
+}
+
+int res_ui_safe_area(unsigned output[2], double safe[4], double *x_scale) {
+    decide();
+    output[0] = R.on ? R.ow : BASE_W;
+    output[1] = R.on ? R.oh : BASE_H;
+    int wide = ui_safe_area_for(output[0], output[1], safe, x_scale);
+    return R.on && wide;
 }
 
 uint64_t res_heap_extra_kib(void) {
@@ -97,6 +124,48 @@ uint64_t res_heap_extra_kib(void) {
 }
 
 uint64_t res_heap_extra_bytes(void) { return ((res_heap_extra_kib() << 10) + 0x1fffff) & ~0x1fffffull; }
+
+int res_selftest(void) {
+    static const unsigned modes[][2] = {{1920, 1080}, {2560, 1440}, {3440, 1440}, {3840, 2160}, {5120, 2160}};
+    for (unsigned i = 0; i < sizeof modes / sizeof *modes; i++) {
+        unsigned sw = 0, sh = 0;
+        if (scene_dimensions(modes[i][0], modes[i][1], 1.0, &sw, &sh) || sw != modes[i][0] || sh != modes[i][1]) {
+            rt_log("resolution selftest: %ux%u at 100%% produced scene %ux%u", modes[i][0], modes[i][1], sw, sh);
+            return 0;
+        }
+    }
+    static const struct { unsigned ow, oh; double x, w, sx; } ui_modes[] = {
+        {1920, 1080, 0, 1920, 1}, {2560, 1440, 0, 2560, 1},
+        {3440, 1440, 440, 2560, 1.34375}, {3840, 2160, 0, 3840, 1},
+        {5120, 2160, 640, 3840, 4.0 / 3.0},
+    };
+    for (unsigned i = 0; i < sizeof ui_modes / sizeof *ui_modes; i++) {
+        double safe[4], sx;
+        int wide = ui_safe_area_for(ui_modes[i].ow, ui_modes[i].oh, safe, &sx);
+        if (fabs(safe[0] - ui_modes[i].x) > 1e-9 || safe[1] != 0 || fabs(safe[2] - ui_modes[i].w) > 1e-9 ||
+            safe[3] != ui_modes[i].oh || fabs(sx - ui_modes[i].sx) > 1e-9 || wide != (ui_modes[i].sx > 1.0)) {
+            rt_log("resolution selftest: UI safe area for %ux%u was x=%g w=%g scale=%g", ui_modes[i].ow, ui_modes[i].oh,
+                   safe[0], safe[2], sx);
+            return 0;
+        }
+    }
+    decide();
+    if (!strcmp(cfg_value("TOTK_RENDER_SCALE"), "100") && (R.sw != R.ow || R.sh != R.oh)) {
+        rt_log("resolution selftest: configured %ux%u at 100%% produced scene %ux%u", R.ow, R.oh, R.sw, R.sh);
+        return 0;
+    }
+    uint64_t extra_kib = res_heap_extra_kib();
+    if (extra_kib > (uint64_t)INT32_MAX - 201728u || extra_kib > (UINT64_MAX - 0x1fffff) >> 10) {
+        rt_log("resolution selftest: texture heap growth overflows HeapDef or application-pool size");
+        return 0;
+    }
+    uint64_t extra_bytes = res_heap_extra_bytes();
+    if (extra_bytes < (extra_kib << 10) || (extra_bytes & 0x1fffff)) {
+        rt_log("resolution selftest: application-pool growth is not safely aligned");
+        return 0;
+    }
+    return 1;
+}
 
 // ---- the HeapDef table. BYML version 2..7, little endian ("YB"): a hash node is {u8 0xC1, u24 count} and count
 // entries {u24 key index, u8 type, u32 value}; an int (type 0xD1) is stored in the entry, so a size changes in place.
@@ -193,33 +262,52 @@ static uint64_t pack(unsigned w, unsigned h) { return (uint64_t)h << 32 | w; }
 
 void res_init(void) {
     if (!bigger()) {
-        rt_log("resolution: the game's own (output 1920x1080, scene 1600x900)");
+        rt_log("resolution: output %ux%u, aspect %.6f, ultrawide off (the game's own scene 1600x900)", BASE_W, BASE_H,
+               (double)BASE_W / BASE_H);
+        rt_log("ultrawide: output %ux%u, aspect %.6f, correction disabled", BASE_W, BASE_H, (double)BASE_W / BASE_H);
+        rt_log("ui: output %ux%u, safe area %ux%u +0x0", BASE_W, BASE_H, BASE_W, BASE_H);
         return;
     }
     int output = rt_patch_set("output"), scene = rt_patch_set("scene");
     if (output < 0 || scene < 0) {
         rt_log("resolution: the generated C has no output and scene patch sets; the game keeps its own resolution");
+        rt_log("ultrawide: correction disabled (resolution patch sets unavailable)");
+        rt_log("ui: safe-area correction disabled (resolution patch sets unavailable)");
         return;
     }
     fs_init();   // romfs.c serves the grown HeapDef from here on (res_heapdef_served)
     if (res_heap_extra_kib() && !R.heapdef_ok) {   // sizes at or below the shipped ones fit the shipped heaps
         rt_log("resolution: no grown HeapDef table; the game keeps its own resolution");
+        rt_log("ultrawide: correction disabled (resolution heap unavailable)");
+        rt_log("ui: safe-area correction disabled (resolution heap unavailable)");
         return;
     }
     uint8_t *page = rt_patch_page();
     double k = RT_V143 ? (double)R.ow / BASE_W : 1.0;   // 1.4.3's own scaling of the scene with the output width
     int scene_on = R.scene_set || (!RT_V143 && (R.ow != BASE_W || R.oh != BASE_H));
     float sc[2] = {(float)(R.sw / k), (float)(R.sh / k)};
+    float aspect = (float)R.ow / (float)R.oh;
     uint64_t out = pack(R.ow, R.oh), none = 0;
     memcpy(page + 16, sc, sizeof sc);
     memcpy(page + 32, &out, 8);
     memcpy(page + 40, &none, 8);
     memcpy(page + 48, &out, 8);
+    memcpy(page + 56, &aspect, sizeof aspect);
     rt_patch_switch(output, R.ow != BASE_W || R.oh != BASE_H);
     rt_patch_switch(scene, scene_on);
+    int ultrawide = rt_patch_set("ultrawide");
+    int ultrawide_on = ultrawide >= 0 && R.ow * 9u != R.oh * 16u;
+    if (ultrawide >= 0) rt_patch_switch(ultrawide, ultrawide_on);
     R.on = 1;
-    rt_log("resolution: output %ux%u, scene %ux%u%s; texture heap +%llu KiB", R.ow, R.oh, R.sw, R.sh,
+    rt_log("resolution: output %ux%u, aspect %.6f, ultrawide %s, scene %ux%u%s; texture heap +%llu KiB", R.ow, R.oh,
+           (double)R.ow / R.oh, ultrawide_on ? "enabled" : "off", R.sw, R.sh,
            scene_on ? "" : " (the game's own 5/6 of the output)", (unsigned long long)res_heap_extra_kib());
+    rt_log("ultrawide: output %ux%u, aspect %.6f, correction %s", R.ow, R.oh, (double)R.ow / R.oh,
+           ultrawide_on ? "enabled" : "disabled");
+    double safe[4], x_scale;
+    ui_safe_area_for(R.ow, R.oh, safe, &x_scale);
+    rt_log("ui: output %ux%u, safe area %.0fx%.0f +%.0fx%.0f (x squeeze %.6f%s)", R.ow, R.oh, safe[2], safe[3],
+           safe[0], safe[1], x_scale, ultrawide_on ? ", correction enabled" : "");
 }
 
 void res_sizes(unsigned out[2], unsigned scene[2]) {
